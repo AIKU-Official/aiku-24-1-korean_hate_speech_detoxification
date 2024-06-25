@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import transformers
 from omegaconf import DictConfig
+from huggingface_hub import notebook_login, create_repo
 
 import torch.distributed as dist
 from torch.distributed.fsdp import (
@@ -40,12 +41,17 @@ import time
 import json
 import functools
 from typing import Optional, Dict, List, Union, Tuple
+from transformers import AddedToken, AutoTokenizer
+from tqdm.notebook import tqdm
+from peft import PeftModel, PeftConfig
+import time
 
 
 def preference_loss(policy_chosen_logps: torch.FloatTensor,
                     policy_rejected_logps: torch.FloatTensor,
                     reference_chosen_logps: torch.FloatTensor,
                     reference_rejected_logps: torch.FloatTensor,
+                    included_emojis : List[bool],
                     beta: float,
                     label_smoothing: float = 0.0,
                     ipo: bool = False,
@@ -82,12 +88,15 @@ def preference_loss(policy_chosen_logps: torch.FloatTensor,
         losses = -F.logsigmoid(beta * logits) * (1 - label_smoothing) - F.logsigmoid(-beta * logits) * label_smoothing
 
     chosen_rewards = beta * (policy_chosen_logps - reference_chosen_logps).detach()
+    emoji_rewards = chosen_rewards[included_emojis]
+    #breakpoint()
+    no_emoji_rewards = chosen_rewards[list(map(lambda x : not x, included_emojis))]#chosen_rewards - emoji_rewards
     rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
 
-    return losses, chosen_rewards, rejected_rewards
+    return losses, chosen_rewards, rejected_rewards, emoji_rewards, no_emoji_rewards
 
 
-def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, average_log_prob: bool = False) -> torch.FloatTensor:
+def _get_batch_logps(tokenizer,logits: torch.FloatTensor, labels: torch.LongTensor, average_log_prob: bool = False) -> torch.FloatTensor:
     """Compute the log probabilities of the given labels under the given logits.
 
     Args:
@@ -100,12 +109,28 @@ def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, averag
     """
     assert logits.shape[:-1] == labels.shape
 
+
     labels = labels[:, 1:].clone()
     logits = logits[:, :-1, :]
     loss_mask = (labels != -100)
 
     # dummy token; we'll ignore the losses on these tokens later
     labels[labels == -100] = 0
+
+    """gen = logits.log_softmax(-1)
+
+    batch, s, _ = gen.size()
+    for b in range(batch):
+        predicted_ids = []
+        for i in range(s):
+            l = gen[b,i,:]
+            predicted_id = l.argmax(-1)
+            predicted_ids.append(tokenizer.decode([predicted_id.squeeze()]))
+        breakpoint()
+        print(''.join(predicted_ids))"""
+    
+    #breakpoint()
+
 
     per_token_logps = torch.gather(logits.log_softmax(-1), dim=2, index=labels.unsqueeze(2)).squeeze(2)
 
@@ -154,12 +179,112 @@ class BasicTrainer(object):
         self.world_size = world_size
         self.config = config
         self.run_dir = run_dir
+        self.exp_name = config.exp_name
+        self.emoji_tokens =  [
+    "😀", "😁", "😂", "🤣", "😃", "😄", "😅", "😆", "😉", "😊", "😋", "😎", "😍", "😘", "🥰", "😗", "😙", "😚",
+    "🙂", "🤗", "🤩", "🤔", "🤨", "😐", "😑", "😶", "🙄", "😏", "😣", "😥", "😮", "🤐", "😯", "😪", "😫", "🥱",
+    "😴", "😌", "😛", "😜", "😝", "🤤", "😒", "😓", "😔", "😕", "🙃", "🤑", "😲", "☹", "🙁", "😖", "😞", "😟",
+    "😤", "😢", "😭", "😦", "😧", "😨", "😩", "🤯", "😬", "😰", "😱", "🥵", "🥶", "😳", "🤪", "😵", "😡", "😠",
+    "🤬", "😷", "🤒", "🤕", "🤢", "🤮", "🤧", "😇", "🥳", "🥺", "🤠", "🤡", "🤥", "🤫", "🤭", "🧐", "🤓", "😈",
+    "👿", "👹", "👺", "💀", "👻", "👽", "👾", "🤖",
 
-        tokenizer_name_or_path = config.model.tokenizer_name_or_path or config.model.name_or_path
-        rank0_print(f'Loading tokenizer {tokenizer_name_or_path}')
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_name_or_path, cache_dir=get_local_dir(config.local_dirs))
-        if self.tokenizer.pad_token_id is None:
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+    "💌", "🕳", "💣", "💎", "🔪", "🗡", "⚔", "🛡", "🚬", "⚰", "⚱", "🏺", "🔮", "📿", "💈", "⚗", "🔭", "🔬",
+    "🕯", "💡", "🔦", "🏮", "📔", "📕", "📖", "📗", "📘", "📙", "📚", "📓", "📒", "📃", "📜", "📄", "📰",
+    "🗞", "📑", "🔖", "🏷", "💰", "💴", "💵", "💶", "💷", "💸", "💳", "🧾", "💹", "✉", "📧", "📨", "📩",
+    "📤", "📥", "📦", "📫", "📪", "📬", "📭", "📮", "🗳", "✏", "✒", "🖋", "🖊", "🖌", "🖍", "📝", "💼",
+    "📁", "📂", "🗂", "📅", "📆", "🗒", "🗓", "📇", "📈", "📉", "📊", "📋", "📌", "📍", "📎", "🖇", "📏",
+    "📐", "✂", "🗃", "🗄", "🗑", "🔒", "🔓", "🔏", "🔐", "🔑", "🗝", "🔨", "🪓", "⛏", "⚒", "🛠", "🗡", "⚔",
+    "🔫", "🏹", "🛡", "🔧", "🔩", "⚙", "🗜", "⚖", "🦯", "🔗", "⛓", "🧰", "🧲", "🧪", "🧫", "🧬", "🔬",
+    "🔭", "📡", "💉", "💊", "🩸", "🩹", "🩺", "🚪", "🛏", "🛋", "🪑", "🚽", "🚿", "🛁", "🪒", "🧴", "🧷",
+    "🧹", "🧺", "🧻", "🧼", "🪣", "🧽", "🪤", "🪒", "🔑", "🗝", "🚪", "🛌", "🛋", "🛏", "🛋", "🪑", "🚽",
+    "🪣", "🛁", "🪞", "🪠", "🪤", "🪒", "🪥", "🛒", "🚬", "⚰", "⚱", "🪦", "🧿", "🪔", "🪒"
+]
+        rank0_print(f'Loaded {len(self.emoji_tokens)} emoji tokens')
+
+        if ("canho" in config.model.name_or_path) or ("jeeyoung" in config.model.name_or_path) or ("beomi" in config.model.name_or_path):
+            #tokenizer = AutoTokenizer.from_pretrained(config.model.base_model_name)
+            IGNORE_INDEX = -100
+            DEFAULT_PAD_TOKEN = "[PAD]"
+            DEFAULT_EOS_TOKEN = "</s>"
+            DEFAULT_BOS_TOKEN = "</s>"
+            DEFAULT_UNK_TOKEN = "</s>"
+            emoji_tokens = self.emoji_tokens
+            added_emoji_tokens = [AddedToken(emoji, rstrip=False, lstrip=False, single_word=False, normalized=False, special=True) for emoji in emoji_tokens]
+            
+            if "beomi" in config.model.tokenizer_name_or_path:
+                base_tokenizer_name = config.model.tokenizer_name_or_path
+            else:
+                peft_config = PeftConfig.from_pretrained(config.model.tokenizer_name_or_path)
+                base_tokenizer_name = peft_config.base_model_name_or_path
+            tokenizer = AutoTokenizer.from_pretrained(
+                base_tokenizer_name,
+                padding_side="right",
+                model_max_length=512,
+            )
+            tokenizer.add_special_tokens(
+            {
+                "eos_token": DEFAULT_EOS_TOKEN,
+                "bos_token": DEFAULT_BOS_TOKEN,
+                "unk_token": DEFAULT_UNK_TOKEN,
+            }
+            )
+
+            tokenizer.add_tokens(added_emoji_tokens)
+
+            for token in added_emoji_tokens:
+                assert tokenizer.convert_tokens_to_ids(token.content) != tokenizer.unk_token_id, f"Token {token.content} was not added correctly."
+            print("All tokens added successfully.")
+            rank0_print(f'Loading tokenizer {config.model.base_model_name}')
+            self.tokenizer=tokenizer
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        elif "kogpt" in config.model.tokenizer_name_or_path:
+            tokenizer_name_or_path = config.model.tokenizer_name_or_path or config.model.name_or_path
+            rank0_print(f'Loading tokenizer {tokenizer_name_or_path}')
+            #breakpoint()
+            IGNORE_INDEX = -100
+            DEFAULT_PAD_TOKEN = "[PAD]"
+            DEFAULT_EOS_TOKEN = "</s>"
+            DEFAULT_BOS_TOKEN = "</s>"
+            DEFAULT_UNK_TOKEN = "</s>"
+            emoji_tokens = self.emoji_tokens
+            self.emoji_tokens = emoji_tokens
+            added_emoji_tokens = [AddedToken(emoji, rstrip=False, lstrip=False, single_word=False, normalized=False, special=True) for emoji in emoji_tokens]
+            
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name_or_path,
+                padding_side="right",
+                model_max_length=512,
+            )
+            tokenizer.add_special_tokens(
+            {
+                "eos_token": DEFAULT_EOS_TOKEN,
+                "bos_token": DEFAULT_BOS_TOKEN,
+                "unk_token": DEFAULT_UNK_TOKEN,
+            }
+            )
+
+            tokenizer.add_tokens(added_emoji_tokens)
+
+            for token in added_emoji_tokens:
+                assert tokenizer.convert_tokens_to_ids(token.content) != tokenizer.unk_token_id, f"Token {token.content} was not added correctly."
+            print("All tokens added successfully.")
+
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_name_or_path,
+                padding_side="right",
+                model_max_length=512,
+            )
+            self.tokenizer=tokenizer
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            #breakpoint()
+
+            
+        else:
+            self.tokenizer = transformers.AutoTokenizer.from_pretrained(config.model.tokenizer_name_or_path, cache_dir=get_local_dir(config.local_dirs))
+            if self.tokenizer.pad_token_id is None:
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         data_iterator_kwargs = dict(
             names=config.datasets,
@@ -171,14 +296,15 @@ class BasicTrainer(object):
         )
 
         self.policy = policy
+        self.policy.resize_token_embeddings(len(tokenizer))
         self.reference_model = reference_model
+        self.reference_model.resize_token_embeddings(len(tokenizer))
 
         self.train_iterator = get_batch_iterator(**data_iterator_kwargs, split='train', n_epochs=config.n_epochs, n_examples=config.n_examples, batch_size=config.batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs))
         rank0_print(f'Loaded train data iterator')
         self.eval_iterator = get_batch_iterator(**data_iterator_kwargs, split='test', n_examples=config.n_eval_examples, batch_size=config.eval_batch_size, silent=rank != 0, cache_dir=get_local_dir(config.local_dirs))
         self.eval_batches = list(self.eval_iterator)
         rank0_print(f'Loaded {len(self.eval_batches)} eval batches of size {config.eval_batch_size}')
-
     def get_batch_samples(self, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
         """Generate samples from the policy (and reference model, if doing DPO training) for the given batch of inputs."""
 
@@ -212,15 +338,27 @@ class BasicTrainer(object):
         
            We do this to avoid doing two forward passes, because it's faster for FSDP.
         """
+        #self.tokenizer.decode(concatenated_batch['concatenated_input_ids'][0])
         concatenated_batch = concatenated_inputs(batch)
+        #breakpoint()
+
+        #all_logits = model.generate(concatenated_batch['concatenated_input_ids'],attention_mask=concatenated_batch['concatenated_attention_mask'])[0]
+
+        """output_txt = self.tokenizer(all_logits)
+        output_sep = "순화한 문장):"
+        if output_sep in output_txt :
+            output_txt = output_txt.split(output_sep)[1]
+        all_logits = self.tokenizer.encode(output_txt)"""
+        self.tokenizer.decode(concatenated_batch['concatenated_input_ids'][3])
         all_logits = model(concatenated_batch['concatenated_input_ids'], attention_mask=concatenated_batch['concatenated_attention_mask']).logits.to(torch.float32)
-        all_logps = _get_batch_logps(all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
+        all_logits2 = model(concatenated_batch['concatenated_input_ids']).logits.to(torch.float32)
+        all_logps = _get_batch_logps(self.tokenizer,all_logits, concatenated_batch['concatenated_labels'], average_log_prob=False)
         chosen_logps = all_logps[:batch['chosen_input_ids'].shape[0]]
         rejected_logps = all_logps[batch['chosen_input_ids'].shape[0]:]
         return chosen_logps, rejected_logps
 
 
-    def get_batch_metrics(self, batch: Dict[str, Union[List, torch.LongTensor]], loss_config: DictConfig, train=True):
+    def get_batch_metrics(self, batch: Dict[str, Union[List, torch.LongTensor]], loss_config: DictConfig,train=True, included_emojis=None):
         """Compute the SFT or DPO loss and other metrics for the given batch of inputs."""
 
         metrics = {}
@@ -238,10 +376,23 @@ class BasicTrainer(object):
             else:
                 raise ValueError(f'unknown loss {loss_config.name}')
 
-            losses, chosen_rewards, rejected_rewards = preference_loss(
-                policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, **loss_kwargs)
+            losses, chosen_rewards, rejected_rewards, emoji_rewards, no_emoji_rewards = preference_loss(
+                policy_chosen_logps, policy_rejected_logps, reference_chosen_logps, reference_rejected_logps, included_emojis=included_emojis, **loss_kwargs)
 
             reward_accuracies = (chosen_rewards > rejected_rewards).float()
+
+
+            if len(emoji_rewards) != 0 : 
+                emoji_rewards = all_gather_if_needed(emoji_rewards,self.rank,self.world_size)
+                metrics[f'rewards_{train_test}/emojis'] = emoji_rewards.cpu().numpy().tolist()
+            else:
+                metrics[f'rewards_{train_test}/emojis'] = [float('NaN')]
+            
+            if len(no_emoji_rewards) != 0 : 
+                no_emoji_rewards = all_gather_if_needed(no_emoji_rewards,self.rank,self.world_size)
+                metrics[f'rewards_{train_test}/no_emojis'] = no_emoji_rewards.cpu().numpy().tolist()
+            else:
+                metrics[f'rewards_{train_test}/no_emojis'] = [float('NaN')]
 
             chosen_rewards = all_gather_if_needed(chosen_rewards, self.rank, self.world_size)
             rejected_rewards = all_gather_if_needed(rejected_rewards, self.rank, self.world_size)
@@ -251,6 +402,8 @@ class BasicTrainer(object):
             metrics[f'rewards_{train_test}/rejected'] = rejected_rewards.cpu().numpy().tolist()
             metrics[f'rewards_{train_test}/accuracies'] = reward_accuracies.cpu().numpy().tolist()
             metrics[f'rewards_{train_test}/margins'] = (chosen_rewards - rejected_rewards).cpu().numpy().tolist()
+
+            #metrics[f'rewards_{train_test}/emojis'] = emoji_rewards.cpu().numpy().tolist()
 
             policy_rejected_logps = all_gather_if_needed(policy_rejected_logps.detach(), self.rank, self.world_size)
             metrics[f'logps_{train_test}/rejected'] = policy_rejected_logps.cpu().numpy().tolist()
@@ -287,23 +440,25 @@ class BasicTrainer(object):
         self.batch_counter = 0
         last_log = None
 
-        for batch in self.train_iterator:
+        for idx,batch in tqdm(enumerate(self.train_iterator)):
             #### BEGIN EVALUATION ####
+            #breakpoint()
+            include_emojis = [ (len(list(set(self.tokenizer.tokenize(batch['chosen'][i])) & set(self.emoji_tokens))) != 0) for i in range(len(batch['chosen'])) ]
             if self.example_counter % self.config.eval_every == 0 and (self.example_counter > 0 or self.config.do_first_eval):
                 rank0_print(f'Running evaluation after {self.example_counter} train examples')
                 self.policy.eval()
-
                 all_eval_metrics = defaultdict(list)
                 if self.config.sample_during_eval:
                     all_policy_samples, all_reference_samples = [], []
                     policy_text_table = wandb.Table(columns=["step", "prompt", "sample"])
-                    if self.config.loss.name in {'dpo', 'ipo'}:
+                    if self.config.loss.name in {'dpo', 'b        ipo'}:
                         reference_text_table = wandb.Table(columns=["step", "prompt", "sample"])
 
-                for eval_batch in (tqdm.tqdm(self.eval_batches, desc='Computing eval metrics') if self.rank == 0 else self.eval_batches):
+                for eval_batch in (tqdm(self.eval_batches, desc='Computing eval metrics') if self.rank == 0 else self.eval_batches):
                     local_eval_batch = slice_and_move_batch_for_device(eval_batch, self.rank, self.world_size, self.rank)
+                    included_emojis = [ (len(list(set(self.tokenizer.tokenize(local_eval_batch['chosen'][i])) & set(self.emoji_tokens))) != 0) for i in range(len(local_eval_batch['chosen'])) ]
                     with torch.no_grad():
-                        _, eval_metrics = self.get_batch_metrics(local_eval_batch, self.config.loss, train=False)
+                        _, eval_metrics = self.get_batch_metrics(local_eval_batch, self.config.loss, train=False,included_emojis=included_emojis)
 
                     for k, v in eval_metrics.items():
                         all_eval_metrics[k].extend(v)
@@ -315,7 +470,7 @@ class BasicTrainer(object):
                     else:
                         n_sample_batches = self.config.n_eval_model_samples // self.config.eval_batch_size
                         sample_batches = self.eval_batches[:n_sample_batches]
-                    for eval_batch in (tqdm.tqdm(sample_batches, desc='Generating samples...') if self.rank == 0 else sample_batches):
+                    for eval_batch in (tqdm(sample_batches, desc='Generating samples...') if self.rank == 0 else sample_batches):
                         local_eval_batch = slice_and_move_batch_for_device(eval_batch, self.rank, self.world_size, self.rank)
                         policy_samples, reference_samples = self.get_batch_samples(local_eval_batch)
 
@@ -360,8 +515,11 @@ class BasicTrainer(object):
             for microbatch_idx in range(self.config.gradient_accumulation_steps):
                 global_microbatch = slice_and_move_batch_for_device(batch, microbatch_idx, self.config.gradient_accumulation_steps, self.rank)
                 local_microbatch = slice_and_move_batch_for_device(global_microbatch, self.rank, self.world_size, self.rank)
-                loss, metrics = self.get_batch_metrics(local_microbatch, self.config.loss, train=True)
-                (loss / self.config.gradient_accumulation_steps).backward()
+
+                #breakpoint()
+                included_emojis = [ (len(list(set(self.tokenizer.tokenize(global_microbatch['chosen'][i])) & set(self.emoji_tokens))) != 0) for i in range(len(global_microbatch['chosen'])) ]
+                loss, metrics = self.get_batch_metrics(global_microbatch, self.config.loss, train=True,included_emojis=included_emojis)
+                (loss / self.config.gradient_accumulation_steps).requires_grad_(True).backward()
 
                 for k, v in metrics.items():
                     batch_metrics[k].extend(v)
@@ -398,7 +556,7 @@ class BasicTrainer(object):
         """Clip the gradient norm of the parameters of a non-FSDP policy."""
         return torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm).item()
 
-    def write_state_dict(self, step: int, state: Dict[str, torch.Tensor], metrics: Dict, filename: str, dir_name: Optional[str] = None):
+    def write_state_dict(self, step: int, state: Dict[str, torch.Tensor], metrics: Dict, filename: str, dir_name: Optional[str] = None, repo_name : Optional[str] = None):
         """Write a checkpoint to disk."""
         if dir_name is None:
             dir_name = os.path.join(self.run_dir, f'LATEST')
@@ -406,25 +564,33 @@ class BasicTrainer(object):
         os.makedirs(dir_name, exist_ok=True)
         output_path = os.path.join(dir_name, filename)
         rank0_print(f'writing checkpoint to {output_path}...')
-        torch.save({
+
+        repo_name = f"jeeyoung/dpo{step}{self.exp_name}"
+        self.policy.push_to_hub(repo_name)
+        #self.policy.save_pretrained(output_path)
+        """torch.save({
             'step_idx': step,
             'state': state,
             'metrics': metrics if metrics is not None else {},
-        }, output_path)
+        }, output_path)"""
     
-    def save(self, output_dir: Optional[str] = None, metrics: Optional[Dict] = None):
+    def save(self, output_dir: Optional[str] = None, metrics: Optional[Dict] = None,repo_name : Optional[str] = None):
         """Save policy, optimizer, and scheduler state to disk."""
 
+        repo_name = f"jeeyoung/dpo{self.example_counter}{self.exp_name}"
+
+        create_repo(repo_name)
+
         policy_state_dict = self.policy.state_dict()
-        self.write_state_dict(self.example_counter, policy_state_dict, metrics, 'policy.pt', output_dir)
+        self.write_state_dict(self.example_counter, policy_state_dict, metrics, 'policy.pt', output_dir, repo_name)
         del policy_state_dict
 
         optimizer_state_dict = self.optimizer.state_dict()
-        self.write_state_dict(self.example_counter, optimizer_state_dict, metrics, 'optimizer.pt', output_dir)
+        self.write_state_dict(self.example_counter, optimizer_state_dict, metrics, 'optimizer.pt', output_dir, repo_name)
         del optimizer_state_dict
 
         scheduler_state_dict = self.scheduler.state_dict()
-        self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir)
+        self.write_state_dict(self.example_counter, scheduler_state_dict, metrics, 'scheduler.pt', output_dir, repo_name)
 
 
 class FSDPTrainer(BasicTrainer):
