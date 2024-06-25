@@ -35,7 +35,59 @@ conda activate komo
 
 ## 사용 방법
 
-(프로젝트 실행 방법 (명령어 등)을 적어주세요.)
+### 1. Get Readty to train models
+
+#### 1.1 Dataset 
+We demonstarted how to generate our custom dataset.It's okay to use your own prepared dataset. Please refer and follow the dataset preparation from here. [here](https://github.com/AIKU-Official/aiku-24-1-korean_hate_speech_detoxification/tree/main/data/README.md)
+
+### 2. Training
+
+#### 2.1 Train with DPO
+
+This is our main methodology. 
+```bash
+cd W_DPO
+bash scripts/train.sh
+```
+#### 2.2 Train with PPO
+We also provide code for training LLMs with PPO methodology. 
+```bash
+cd PPO
+```
+You can follow instructions in PPO.ipynb
+#### 2.3 Train Reward Model for PPO
+We also provide code for training reward model in case you want to customize reward model depending on your own datasets.
+```bash
+cd PPO
+```
+You can follow instructions in RM.ipynb
+
+### 3. Getting Weights
+If you've trained your model, you will get checkpoints in each folder. We are not prepared with our own checkpoints yet. Full checkpoints will be released soon!
+
+### 4. Inference
+
+
+#### 4.1 Inference with DPO
+```bash
+cd W_DPO
+bash scripts/inference.sh
+```
+
+#### 4.2 Inference with PPO
+We also provide code for producing inference results with PPO methodology. 
+```bash
+cd PPO
+```
+You can follow instructions in PPO.ipynb
+#### 4.3 Train Reward Model for PPO
+We also provide code for producing inference results with reward model. 
+```bash
+cd PPO
+```
+You can follow instructions in RM.ipynb
+
+
 
 ## 예시 결과
 
