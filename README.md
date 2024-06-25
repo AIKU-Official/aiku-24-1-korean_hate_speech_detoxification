@@ -38,7 +38,7 @@ conda activate komo
 ### 1. Get Readty to train models
 
 #### 1.1 Dataset 
-We demonstarted how to generate our custom dataset.It's okay to use your own prepared dataset. Please refer and follow the dataset preparation from [here](https://github.com/AIKU-Official/aiku-24-1-korean_hate_speech_detoxification/tree/main/data/README.md).
+We demonstrated how to generate our custom dataset.It's okay to use your own prepared dataset. Please refer and follow the dataset preparation from [here](https://github.com/AIKU-Official/aiku-24-1-korean_hate_speech_detoxification/tree/main/data/README.md).
 
 ### 2. Training
 
