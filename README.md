@@ -28,7 +28,10 @@ NLP 분야에서 사회적 문제, 특히 언어 순화(`Language Detoxification
 
 ## 환경 설정
 
-(Requirements, Anaconda, Docker 등 프로젝트를 사용하는데에 필요한 요구 사항을 나열해주세요)
+```
+conda env create -f komo.yaml
+conda activate komo
+```
 
 ## 사용 방법
 
