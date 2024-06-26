@@ -37,10 +37,33 @@ conda activate komo
 
 ### 1. Get Readty to train models
 
+```
+ ___  SFT ___  SFT_koalpaca.ipynb (koAlpaca fine-tuning, inference)
+|
+ ___  W_DPO ___  config
+|         | ___  dataset
+|         | ___  model
+|         | ___  scripts
+|         | ___  inference.py, train.py
+|         
+ ___   PPO ___ PPO.ipynb (PPO training)
+|        | ___ RM.ipynb (RM training, inference)
+|
+|___  data ___ dataset_generation_profanity.ipynb (dataset augmentation using Claude API prompts & codes)
+|         | ___ korean_detoxification_test.json (our dataset - test)
+|___ komo.yaml (conda env) 
+```
+
 #### 1.1 Dataset 
 We demonstrated how to generate our custom dataset.It's okay to use your own prepared dataset. Please refer and follow the dataset preparation from [here](https://github.com/AIKU-Official/aiku-24-1-korean_hate_speech_detoxification/tree/main/data/README.md).
 
 ### 2. Training
+
+#### 2.0 Train SFT (koAlpaca)
+```bash
+cd SFT
+```
+You can follow instructions in SFT_koalpaca.ipynb
 
 #### 2.1 Train with DPO
 
